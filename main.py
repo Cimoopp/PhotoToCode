@@ -7,6 +7,9 @@ PhotoToCode 1.0 — превращает любую картинку в код.
   * ASCII-арт
   * SVG — цветная или чёрно-белая векторизация контуров
 
+Трейсер написан на чистом Python, поэтому для SVG поле ограничено
+320 px (SVG_MAX_SIDE) — иначе обработка занимает минуты, особенно на телефоне.
+
 Запуск на ПК:   python main.py
 Сборка EXE:     pyinstaller --onefile --windowed --name PhotoToCode main.py
 Сборка APK:     buildozer android debug
@@ -36,6 +39,8 @@ from kivy.utils import platform
 
 APP_TITLE = "PhotoToCode"
 PREVIEW_LIMIT = 20000
+SVG_MAX_SIDE = 320          # предел поля для чистого Python-трейсера
+SVG_DEFAULT_SIDE = 240      # что подставляется при входе в SVG-режим
 
 try:
     RESAMPLE = Image.Resampling.LANCZOS
@@ -286,8 +291,9 @@ def _dp(pts, eps):
     return [pts[k] for k in range(n) if keep[k]]
 
 
-def image_to_svg(path, max_side=160, colors=8, eps=0.9):
+def image_to_svg(path, max_side=SVG_DEFAULT_SIDE, colors=8, eps=0.9):
     """Цветная векторизация: квантование цветов + обводка контуров."""
+    max_side = max(80, min(int(max_side), SVG_MAX_SIDE))
     img = load_image(path, max_side).convert("RGB")
     w, h = img.size
     q = img.quantize(colors=max(2, min(256, int(colors))))
@@ -363,11 +369,13 @@ def convert(path, mode, params):
         text = image_to_ascii(path, ascii_w)
         return text, "txt", "Ширина %d символов" % ascii_w
     if mode == "svg_bw":
-        text = image_to_svg(path, size, 2)
-        return text, "svg", "2 цвета"
+        side = max(80, min(size, SVG_MAX_SIDE))
+        text = image_to_svg(path, side, 2)
+        return text, "svg", "2 цвета, поле %d px" % side
     if mode == "svg_color":
-        text = image_to_svg(path, size, colors)
-        return text, "svg", "%d цветов" % colors
+        side = max(80, min(size, SVG_MAX_SIDE))
+        text = image_to_svg(path, side, colors)
+        return text, "svg", "%d цветов, поле %d px" % (colors, side)
     raise ValueError("неизвестный режим: %s" % mode)
 
 
@@ -381,6 +389,7 @@ class PhotoToCode(BoxLayout):
         self.source_path = ""
         self.result_text = ""
         self.result_ext = "txt"
+        self._b64_size = 0          # детализация, которую вернуть из SVG-режима
         self._build()
 
     # ---------------------------------------------------------- сборка UI
@@ -403,11 +412,12 @@ class PhotoToCode(BoxLayout):
         self.spinner.bind(text=self.on_mode_change)
         self.add_widget(self.spinner)
 
-        self.row_size, self.sl_size = self._slider("Детализация, px", 60, 1600, 1200, 20)
+        self.row_size, self.sl_size, self.lbl_size = self._slider(
+            "Детализация, px", 60, 1600, 1200, 20)
         self.add_widget(self.row_size)
-        self.row_colors, self.sl_colors = self._slider("Цветов SVG", 2, 16, 8, 1)
+        self.row_colors, self.sl_colors, _ = self._slider("Цветов SVG", 2, 16, 8, 1)
         self.add_widget(self.row_colors)
-        self.row_ascii, self.sl_ascii = self._slider("Ширина ASCII", 40, 220, 100, 5)
+        self.row_ascii, self.sl_ascii, _ = self._slider("Ширина ASCII", 40, 220, 100, 5)
         self.add_widget(self.row_ascii)
 
         row_btn = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
@@ -442,7 +452,7 @@ class PhotoToCode(BoxLayout):
         sl = Slider(min=mn, max=mx, value=val, step=step)
         box.add_widget(lbl)
         box.add_widget(sl)
-        return box, sl
+        return box, sl, lbl
 
     # ------------------------------------------------------------ логика
     def current_mode(self):
@@ -453,11 +463,24 @@ class PhotoToCode(BoxLayout):
 
     def on_mode_change(self, *args):
         mode = self.current_mode()
+        is_svg = mode in ("svg_color", "svg_bw")
         need_size = mode in ("base64_html", "base64_php", "base64_css",
                              "base64_raw", "svg_color", "svg_bw")
         self.row_size.disabled = not need_size
         self.row_colors.disabled = mode != "svg_color"
         self.row_ascii.disabled = mode != "ascii"
+
+        # У SVG-трейсера своё поле: запоминаем «большое» значение и вернём его
+        if is_svg:
+            if self.sl_size.value > SVG_MAX_SIDE:
+                self._b64_size = self.sl_size.value
+                self.sl_size.value = SVG_DEFAULT_SIDE
+            self.lbl_size.text = "Детализация, px (SVG ≤ %d)" % SVG_MAX_SIDE
+        else:
+            if self._b64_size:
+                self.sl_size.value = self._b64_size
+                self._b64_size = 0
+            self.lbl_size.text = "Детализация, px"
 
     def set_status(self, text):
         self.lbl_status.text = text
